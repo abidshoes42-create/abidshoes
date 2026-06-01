@@ -7,7 +7,7 @@ from flask_cors import CORS
 import sqlite3, os, datetime, json
 
 app = Flask(__name__)
-CORS(app)  # Website se connection allow karo
+CORS(app)
 
 DB = "abidshoes_web.db"
 API_KEY = os.environ.get("API_KEY", "abidshoes2024secret")
@@ -25,7 +25,7 @@ def init_db():
             barcode TEXT UNIQUE,
             name TEXT, brand TEXT, category TEXT,
             price REAL, stock INTEGER DEFAULT 0,
-            image_url TEXT, description TEXT,
+            image_url TEXT, sizes TEXT, description TEXT,
             is_active INTEGER DEFAULT 1,
             updated_at TEXT
         );
@@ -43,7 +43,14 @@ def init_db():
             key TEXT PRIMARY KEY, value TEXT
         );
     """)
-    # Default shop info
+    # Add image_url and sizes columns if missing (for existing DBs)
+    try:
+        c.execute("ALTER TABLE products ADD COLUMN image_url TEXT")
+    except: pass
+    try:
+        c.execute("ALTER TABLE products ADD COLUMN sizes TEXT")
+    except: pass
+    
     defaults = [
         ("shop_name", "Abid Shoes"),
         ("shop_address", "Main Bazar Jhumra Road, Khurrianwala, Faisalabad"),
@@ -53,6 +60,7 @@ def init_db():
         ("delivery_charges", "200"),
         ("free_delivery_above", "3000"),
         ("banner_text", "Quality Footwear at Best Prices!"),
+        ("banner_size", "Medium"),
     ]
     for k, v in defaults:
         c.execute("INSERT OR IGNORE INTO shop_info(key,value) VALUES (?,?)", (k,v))
@@ -60,22 +68,16 @@ def init_db():
 
 init_db()
 
-# ── Auth check ──
 def check_key():
     key = request.headers.get("X-API-Key") or request.args.get("key")
     return key == API_KEY
 
-# ══════════════════════════════════
-# PUBLIC ENDPOINTS (website ke liye)
-# ══════════════════════════════════
-
 @app.route("/")
 def home():
-    return jsonify({"status": "Abid Shoes API running", "version": "1.0"})
+    return jsonify({"status": "Abid Shoes API running", "version": "2.0"})
 
 @app.route("/api/products")
 def get_products():
-    """Sab products — website pe show honge"""
     conn = get_db(); c = conn.cursor()
     brand = request.args.get("brand", "")
     category = request.args.get("category", "")
@@ -120,14 +122,13 @@ def get_shop():
 
 @app.route("/api/orders", methods=["POST"])
 def place_order():
-    """Customer ka order receive karo"""
     data = request.json
     if not data:
         return jsonify({"error": "No data"}), 400
     required = ["customer_name", "customer_phone", "customer_address", "items"]
     for f in required:
         if not data.get(f):
-            return jsonify({"error": f"{f} zaroori hai"}), 400
+            return jsonify({"error": f"{f} required"}), 400
 
     conn = get_db(); c = conn.cursor()
     now = datetime.datetime.now()
@@ -135,7 +136,6 @@ def place_order():
     items = json.dumps(data.get("items", []))
     subtotal = float(data.get("subtotal", 0))
 
-    # Free delivery check
     free_above = float(c.execute("SELECT value FROM shop_info WHERE key='free_delivery_above'").fetchone()[0] or 3000)
     delivery_charges = float(c.execute("SELECT value FROM shop_info WHERE key='delivery_charges'").fetchone()[0] or 200)
     delivery = 0 if subtotal >= free_above else delivery_charges
@@ -157,25 +157,21 @@ def place_order():
         "order_no": order_no,
         "total": total,
         "delivery": delivery,
-        "message": f"Order {order_no} place ho gaya! Hum jald rabta karenge."
+        "message": f"Order {order_no} placed successfully!"
     })
 
 @app.route("/api/orders/<order_no>")
 def track_order(order_no):
-    """Order track karo"""
     conn = get_db()
     r = conn.execute("SELECT order_no,customer_name,status,total,created_at FROM orders WHERE order_no=?", (order_no,)).fetchone()
     conn.close()
-    if not r: return jsonify({"error": "Order nahi mila"}), 404
+    if not r: return jsonify({"error": "Order not found"}), 404
     return jsonify(dict(r))
 
-# ══════════════════════════════════
-# POS ENDPOINTS (password protected)
-# ══════════════════════════════════
+# ── POS ENDPOINTS ──
 
 @app.route("/api/sync", methods=["POST"])
 def sync_from_pos():
-    """POS se products sync karo"""
     if not check_key():
         return jsonify({"error": "Unauthorized"}), 401
     data = request.json
@@ -185,20 +181,28 @@ def sync_from_pos():
     conn = get_db(); c = conn.cursor()
     updated = 0
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    
     for p in data["products"]:
+        # ✅ image_url aur sizes bhi save ho raha hai
         c.execute("""INSERT OR REPLACE INTO products
-                     (barcode,name,brand,category,price,stock,is_active,updated_at)
-                     VALUES (?,?,?,?,?,?,1,?)""",
+                     (barcode,name,brand,category,price,stock,image_url,sizes,is_active,updated_at)
+                     VALUES (?,?,?,?,?,?,?,?,1,?)""",
                   (p.get("barcode",""), p.get("name",""),
                    p.get("brand",""), p.get("category",""),
-                   float(p.get("price",0)), int(p.get("stock",0)), now))
+                   float(p.get("price",0)), int(p.get("stock",0)),
+                   p.get("image_url",""), p.get("sizes",""), now))
         updated += 1
+    
+    # Shop info bhi update
+    if "shop_info" in data:
+        for k, v in data["shop_info"].items():
+            c.execute("INSERT OR REPLACE INTO shop_info(key,value) VALUES (?,?)", (k,v))
+    
     conn.commit(); conn.close()
     return jsonify({"success": True, "updated": updated, "time": now})
 
 @app.route("/api/orders/list")
 def list_orders():
-    """POS mein orders dekhna"""
     if not check_key():
         return jsonify({"error": "Unauthorized"}), 401
     conn = get_db()
@@ -212,7 +216,6 @@ def list_orders():
 
 @app.route("/api/orders/<order_no>/status", methods=["PUT"])
 def update_order_status(order_no):
-    """Order status update karo"""
     if not check_key():
         return jsonify({"error": "Unauthorized"}), 401
     data = request.json
@@ -224,7 +227,6 @@ def update_order_status(order_no):
 
 @app.route("/api/shop/update", methods=["POST"])
 def update_shop():
-    """Shop info update"""
     if not check_key():
         return jsonify({"error": "Unauthorized"}), 401
     data = request.json
