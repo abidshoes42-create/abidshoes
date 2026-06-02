@@ -25,7 +25,7 @@ def init_db():
             barcode TEXT UNIQUE,
             name TEXT, brand TEXT, category TEXT,
             price REAL, stock INTEGER DEFAULT 0,
-            image_url TEXT, sizes TEXT, description TEXT,
+            image_url TEXT, sizes TEXT, gender TEXT DEFAULT 'Unisex', description TEXT,
             is_active INTEGER DEFAULT 1,
             updated_at TEXT
         );
@@ -49,6 +49,9 @@ def init_db():
     except: pass
     try:
         c.execute("ALTER TABLE products ADD COLUMN sizes TEXT")
+    except: pass
+    try:
+        c.execute("ALTER TABLE products ADD COLUMN gender TEXT DEFAULT 'Unisex'")
     except: pass
     
     defaults = [
@@ -185,12 +188,13 @@ def sync_from_pos():
     for p in data["products"]:
         # ✅ image_url aur sizes bhi save ho raha hai
         c.execute("""INSERT OR REPLACE INTO products
-                     (barcode,name,brand,category,price,stock,image_url,sizes,is_active,updated_at)
-                     VALUES (?,?,?,?,?,?,?,?,1,?)""",
+                     (barcode,name,brand,category,price,stock,image_url,sizes,gender,is_active,updated_at)
+                     VALUES (?,?,?,?,?,?,?,?,?,1,?)""",
                   (p.get("barcode",""), p.get("name",""),
                    p.get("brand",""), p.get("category",""),
                    float(p.get("price",0)), int(p.get("stock",0)),
-                   p.get("image_url",""), p.get("sizes",""), now))
+                   p.get("image_url",""), p.get("sizes",""),
+                   p.get("gender","Unisex"), now))
         updated += 1
     
     # Shop info bhi update
