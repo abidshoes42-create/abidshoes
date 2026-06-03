@@ -154,7 +154,7 @@ def list_orders():
     if not check_key(): return jsonify({"error":"Unauthorized"}),401
     conn = get_db()
     status = request.args.get("status","")
-    q = f"SELECT * FROM orders WHERE shop_source='{SHOP_SOURCE}'"
+    q = "SELECT * FROM orders WHERE 1=1"
     if status: q += f" AND status='{status}'"
     q += " ORDER BY id DESC LIMIT 100"
     rows = conn.execute(q).fetchall()
