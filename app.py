@@ -90,7 +90,8 @@ def get_shop():
     conn = get_db()
     rows = conn.execute("SELECT key,value FROM shop_info").fetchall()
     conn.close()
-    return jsonify({r[0]:r[1] for r in rows})
+    data = {r[0]:r[1] for r in rows}
+    return jsonify(data)
 
 @app.route("/api/orders", methods=["POST"])
 def place_order():
