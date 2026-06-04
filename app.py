@@ -351,3 +351,14 @@ def admin_branches():
     """).fetchall()
     conn.close()
     return jsonify([dict(r) for r in rows])
+
+@app.route("/admin")
+def admin_page():
+    import os
+    admin_path = os.path.join(os.path.dirname(__file__), 'admin.html')
+    with open(admin_path, 'r') as f:
+        return f.read()
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT",5000))
+    app.run(host="0.0.0.0",port=port,debug=False)
