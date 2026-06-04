@@ -184,3 +184,170 @@ def update_shop():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT",5000))
     app.run(host="0.0.0.0",port=port,debug=False)
+
+# ── ADMIN TABLES ──────────────────────────────────────────
+
+def init_admin_tables():
+    conn = get_db(); c = conn.cursor()
+    c.executescript("""
+        CREATE TABLE IF NOT EXISTS sales_summary(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            branch_id INTEGER DEFAULT 1,
+            branch_name TEXT DEFAULT 'Main Shop',
+            date TEXT,
+            total_sales REAL DEFAULT 0,
+            total_profit REAL DEFAULT 0,
+            total_returns REAL DEFAULT 0,
+            invoice_count INTEGER DEFAULT 0,
+            synced_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS stock_summary(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            branch_id INTEGER DEFAULT 1,
+            branch_name TEXT DEFAULT 'Main Shop',
+            barcode TEXT,
+            name TEXT,
+            brand TEXT,
+            category TEXT,
+            stock INTEGER DEFAULT 0,
+            price REAL DEFAULT 0,
+            synced_at TEXT
+        );
+    """)
+    conn.commit(); conn.close()
+
+init_admin_tables()
+
+# ── ADMIN SYNC ENDPOINTS ──────────────────────────────────
+
+@app.route("/api/admin/sync", methods=["POST"])
+def admin_sync():
+    if not check_key(): return jsonify({"error":"Unauthorized"}),401
+    data = request.json
+    if not data: return jsonify({"error":"No data"}),400
+
+    conn = get_db(); c = conn.cursor()
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    # Sales summary
+    if "sales" in data:
+        for s in data["sales"]:
+            # Delete existing record for this branch+date
+            c.execute("DELETE FROM sales_summary WHERE branch_id=? AND date=?",
+                      (s.get("branch_id",1), s.get("date","")))
+            c.execute("""INSERT INTO sales_summary
+                        (branch_id,branch_name,date,total_sales,total_profit,
+                         total_returns,invoice_count,synced_at)
+                        VALUES (?,?,?,?,?,?,?,?)""",
+                      (s.get("branch_id",1), s.get("branch_name","Main Shop"),
+                       s.get("date",""), float(s.get("total_sales",0)),
+                       float(s.get("total_profit",0)), float(s.get("total_returns",0)),
+                       int(s.get("invoice_count",0)), now))
+
+    # Stock summary
+    if "stock" in data:
+        branch_id = data["stock"][0].get("branch_id",1) if data["stock"] else 1
+        c.execute("DELETE FROM stock_summary WHERE branch_id=?", (branch_id,))
+        for st in data["stock"]:
+            c.execute("""INSERT INTO stock_summary
+                        (branch_id,branch_name,barcode,name,brand,category,stock,price,synced_at)
+                        VALUES (?,?,?,?,?,?,?,?,?)""",
+                      (st.get("branch_id",1), st.get("branch_name","Main Shop"),
+                       st.get("barcode",""), st.get("name",""),
+                       st.get("brand",""), st.get("category",""),
+                       int(st.get("stock",0)), float(st.get("price",0)), now))
+
+    conn.commit(); conn.close()
+    return jsonify({"success":True,"synced_at":now})
+
+# ── ADMIN VIEW ENDPOINTS ──────────────────────────────────
+
+@app.route("/api/admin/dashboard")
+def admin_dashboard():
+    if not check_key(): return jsonify({"error":"Unauthorized"}),401
+    conn = get_db(); c = conn.cursor()
+
+    # Last 30 days sales per branch
+    rows = c.execute("""
+        SELECT branch_id, branch_name,
+               SUM(total_sales) as sales,
+               SUM(total_profit) as profit,
+               SUM(total_returns) as returns,
+               SUM(invoice_count) as invoices,
+               MAX(synced_at) as last_sync
+        FROM sales_summary
+        WHERE date >= date('now','-30 days')
+        GROUP BY branch_id, branch_name
+        ORDER BY branch_id
+    """).fetchall()
+
+    # Today
+    today_rows = c.execute("""
+        SELECT branch_id, branch_name,
+               SUM(total_sales) as sales,
+               SUM(total_profit) as profit,
+               SUM(invoice_count) as invoices
+        FROM sales_summary
+        WHERE date = date('now')
+        GROUP BY branch_id, branch_name
+    """).fetchall()
+
+    # Orders pending
+    orders = c.execute("SELECT COUNT(*) FROM orders WHERE status='Pending'").fetchone()[0]
+
+    conn.close()
+    return jsonify({
+        "monthly": [dict(r) for r in rows],
+        "today": [dict(r) for r in today_rows],
+        "pending_orders": orders
+    })
+
+@app.route("/api/admin/sales")
+def admin_sales():
+    if not check_key(): return jsonify({"error":"Unauthorized"}),401
+    conn = get_db()
+    branch_id = request.args.get("branch_id","")
+    date_from = request.args.get("from", (datetime.datetime.now()-datetime.timedelta(days=30)).strftime("%Y-%m-%d"))
+    date_to = request.args.get("to", datetime.datetime.now().strftime("%Y-%m-%d"))
+
+    q = "SELECT * FROM sales_summary WHERE date>=? AND date<=?"
+    params = [date_from, date_to]
+    if branch_id:
+        q += " AND branch_id=?"
+        params.append(branch_id)
+    q += " ORDER BY date DESC, branch_id"
+
+    rows = conn.execute(q, params).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+@app.route("/api/admin/stock")
+def admin_stock():
+    if not check_key(): return jsonify({"error":"Unauthorized"}),401
+    conn = get_db()
+    branch_id = request.args.get("branch_id","")
+    search = request.args.get("search","")
+
+    q = "SELECT * FROM stock_summary WHERE stock>0"
+    params = []
+    if branch_id:
+        q += " AND branch_id=?"; params.append(branch_id)
+    if search:
+        q += " AND (name LIKE ? OR brand LIKE ? OR barcode LIKE ?)"
+        params.extend([f"%{search}%"]*3)
+    q += " ORDER BY branch_id, brand, name"
+
+    rows = conn.execute(q, params).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+@app.route("/api/admin/branches")
+def admin_branches():
+    if not check_key(): return jsonify({"error":"Unauthorized"}),401
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT DISTINCT branch_id, branch_name, MAX(synced_at) as last_sync
+        FROM sales_summary GROUP BY branch_id, branch_name
+    """).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
